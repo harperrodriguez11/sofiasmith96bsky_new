@@ -1,0 +1,85 @@
+name: Bluesky Auto Poster
+on:
+  schedule:
+    # Runs every 6 hours = 4 times a day. Each job has a ~6h hard cap
+    # (timeout-minutes below), so this also acts as the restart trigger:
+    # by the time this fires again, the previous run has wrapped up (or
+    # been killed at the cap) and a fresh one starts right after. The
+    # script itself handles the actual posting cadence internally via its
+    # own loop, so this schedule just keeps that loop continuously alive.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:       # manual trigger from the Actions tab, with knobs
+    inputs:
+      caption_sheet_name:
+        description: "Caption category / sheet tab to use (e.g. 'recipes', 'fitness'). Created automatically the first time a new name is used, then reused as-is from then on."
+        required: false
+        default: ""
+      image_ratio:
+        description: "Image post share (e.g. 60 or 0.6) — auto-normalized against video_ratio"
+        required: false
+        default: ""
+      video_ratio:
+        description: "Video post share (e.g. 40 or 0.4) — auto-normalized against image_ratio"
+        required: false
+        default: ""
+      no_link_ratio:
+        description: "Chance a post skips the caption/CTA/link block (e.g. 20 or 0.2)"
+        required: false
+        default: ""
+      hashtags_enabled_image:
+        description: "Attach hashtags to image posts?"
+        required: false
+        default: ""
+        type: choice
+        options: ["", "true", "false"]
+      hashtags_enabled_video:
+        description: "Attach hashtags to video posts?"
+        required: false
+        default: ""
+        type: choice
+        options: ["", "true", "false"]
+
+# Only one instance of the poster should ever be active at a time
+concurrency:
+  group: bluesky-poster
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions:
+      actions: write   # needed so the ban-detect step can disable this workflow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib atproto
+      - name: Run poster loop
+        run: python -u post_bluesky.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          BSKY_HANDLE: ${{ vars.BSKY_HANDLE }}
+          BSKY_APP_PW: ${{ secrets.BSKY_APP_PW }}
+          GOOGLE_OAUTH_CREDENTIALS: ${{ secrets.GOOGLE_OAUTH_CREDENTIALS }}
+          UPLOAD_FOLDER_ID: ${{ secrets.UPLOAD_FOLDER_ID }}
+          PROCESSED_FOLDER_ID: ${{ secrets.PROCESSED_FOLDER_ID }}
+          CAPTION_SHEET_NAME: ${{ github.event.inputs.caption_sheet_name || vars.CAPTION_SHEET_NAME || 'assian' }}
+          IMAGE_RATIO: ${{ github.event.inputs.image_ratio || vars.IMAGE_RATIO || '60' }}
+          VIDEO_RATIO: ${{ github.event.inputs.video_ratio || vars.VIDEO_RATIO || '40' }}
+          NO_LINK_RATIO: ${{ github.event.inputs.no_link_ratio || vars.NO_LINK_RATIO || '20' }}
+          HASHTAGS_ENABLED_IMAGE: ${{ github.event.inputs.hashtags_enabled_image || vars.HASHTAGS_ENABLED_IMAGE || 'true' }}
+          HASHTAGS_ENABLED_VIDEO: ${{ github.event.inputs.hashtags_enabled_video || vars.HASHTAGS_ENABLED_VIDEO || 'false' }}
+
+      # When the script exits with code 1 (account banned/taken down), this
+      # step disables the workflow schedule so it stops firing automatically.
+      # Requires the workflow to have "Actions: write" permission (added above).
+      - name: Disable workflow schedule on account ban
+        if: failure()
+        run: |
+          echo "Job failed — disabling workflow schedule to stop future runs on banned account."
+          gh workflow disable "${{ github.workflow }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
